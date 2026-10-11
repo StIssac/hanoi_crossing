@@ -7,9 +7,10 @@
   [Python API](README.md#python-api-contract), and
   [input/output contract](README.md#input-and-output) define the agreed behavior.
   The class and sequence diagrams explain the module boundaries and call flow.
-- The current repository implements immutable data models, constructor
-  validation, exports, and interface stubs. Gameplay and both frontends remain
-  unimplemented. Do not describe a passing model test as a working game.
+- The current repository implements immutable models and the four core engine
+  functions: initialization, observation, legal actions, and atomic transitions
+  with adjudication. Random-player selection and both frontends remain stubs.
+  Direct engine tests do not establish end-to-end frontend behavior.
 - Implement only the requested stage. Keep a pending function's explicit
   `NotImplementedError` until its behavior is implemented; never substitute a
   fabricated successful result. Update the README status when that changes.
@@ -22,6 +23,11 @@
   and `StepResult`. They are frozen, slotted, and deeply immutable. Validate
   mutable or malformed inputs rather than retaining them or silently coercing
   them. Keep tuple order consistent with the documented constants.
+- `GameState` construction centrally validates inventory, stack order, and
+  winner consistency. Reject contradictory winner labels or simultaneous winners
+  with `ValueError`; do not add a tiebreak or historical reachability search.
+  Compute a transition's winner before constructing its new state, with no
+  externally visible unadjudicated intermediate `GameState`.
 - Keep `new_game`, `observe`, `legal_actions`, and `step` as functions with
   explicit state or observation arguments. Use no mutable game globals,
   engine-owned random generator, turn scheduler, file I/O, or frontend imports.
@@ -43,7 +49,8 @@
 - Keep the core below 500 physical Python lines, including comments and blank
   lines. Count `engine.py`, `__init__.py`, and any future module containing model,
   validation, rule, or adjudication logic. Moving rules elsewhere does not remove
-  them from this count.
+  them from this count. `test_core_size.py` counts every package Python file
+  except the two existing frontend modules, so new core helpers count by default.
 
 ## Interfaces, fixtures, and tests
 

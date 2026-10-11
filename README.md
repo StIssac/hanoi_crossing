@@ -1,14 +1,14 @@
 # Hanoi Crossing
 
-An immutable data model and interface foundation for the Hanoi Crossing assignment.
+An immutable, reusable game engine for the Hanoi Crossing assignment.
 This repository uses uv and the Python standard library.
 
-**Current status:** the four data classes, constructor validation, public exports,
-function signatures, and model/contract tests exist. Initialization, observation
-projection, legal-move generation, transitions, random selection, replay, and CLI
-execution are **not implemented**. Their functions raise `NotImplementedError`.
-The behavior specified below is the implementation contract, not a claim that a
-complete game can already run.
+**Current status:** the core engine implements initialization, player observations,
+legal-action enumeration, atomic transitions, input validation, and adjudication.
+Direct engine tests exercise those rules and the immutable models. Random action
+selection, replay, and CLI execution are **not implemented**; their functions
+still raise `NotImplementedError`. Their contracts below describe planned
+behavior, and the complete assignment is not yet finished.
 
 ## Setup
 
@@ -20,8 +20,9 @@ uv sync --locked
 uv run --locked python -m unittest discover -s tests -v
 ```
 
-The tests cover model validation, immutability, API signatures, explicit stub
-failure, and example-file consistency. They do not establish gameplay correctness.
+The tests cover model validation, immutability, engine rules and errors, reachable
+N=1 states, core line count, API signatures, remaining frontend stubs, and
+example-file consistency. They do not establish end-to-end frontend behavior.
 
 If this macOS environment reports `Skipping hidden .pth file` for its default
 `.venv`, use a separate environment for both commands:
@@ -45,6 +46,8 @@ src/hanoi_crossing/
     cli.py               # Replay and random-play frontends
 tests/
     test_engine.py
+    test_gameplay.py
+    test_core_size.py
     test_random_player.py
     test_cli.py
 examples/
@@ -59,6 +62,10 @@ module containing engine logic also counts. The CLI handles I/O, scheduling,
 run limits, and reports. The random player receives only an observation and an
 injected `random.Random` instance. There is no engine-owned RNG, scheduler, I/O,
 HTTP service, or RL training implementation.
+
+`test_core_size.py` automatically counts all package Python files except the two
+frontend modules (`cli.py` and `random_player.py`). This includes future core
+helpers. It fails at 500 lines; moving rules into a frontend is not allowed.
 
 ## Rules
 
@@ -95,6 +102,13 @@ Terminal states are frozen. Repeated positions and repeated skips do not cause
 a draw. Replay exhaustion and a random-run step limit stop the run without a
 winner; they are not game-defined draws.
 
+In a reachable nonterminal state, at least one player has a non-skip action.
+Initially a starting disk can be lifted; afterward, the most recent successful
+non-skip action can be reversed by the same player. Later skips and rejected
+actions preserve that option. This is a rule-level argument, not a guarantee
+that a runner will finish: an unfair schedule, repeated actions, or poor
+strategies can prevent progress indefinitely.
+
 ## Data model
 
 All four classes are `@dataclass(frozen=True, slots=True)`. Stored collections
@@ -121,12 +135,22 @@ must contain exactly the contiguous set `1..2N` for some positive `N`; an
 observation contains only its visible subset. Invalid model values raise
 `ValueError`; ordinary Python call-signature errors remain `TypeError`.
 
-These checks establish structural validity, not reachability or adjudication.
-A valid winner label is not yet checked against the board. Observations cannot
-prove that they were faithfully projected, and `StepResult` has no previous
-state with which to check a rejection. Those guarantees belong to the pending
-engine functions; transition-time disk conservation must preserve the original
-game's inventory, not merely some structurally valid `1..2N` set.
+`GameState` construction is the single validation boundary for both structural
+invariants and the cached winner. The supplied `winner` must exactly match the
+board: `None` when neither player wins, or the sole winning player's label.
+Missing or incorrect winner labels raise `ValueError`. A board satisfying both
+players' win conditions also raises `ValueError`; the engine invents no tiebreak
+for a state that cannot arise under immediate stopping. Full historical
+reachability is not checked.
+
+Engine functions require the declared model types and rely on these immutable
+constructor invariants. `step` computes the new poles, hands, and winner before
+constructing one complete `GameState`, so it exposes no unadjudicated intermediate
+state. Successful transitions preserve the original inventory. Skips and rejected
+actions retain the already validated input object. `observe` provides a faithful
+projection; an independently constructed `Observation` can validate only its
+visible subset. Likewise, `StepResult` alone cannot prove rejection identity
+without a previous state, but `step` guarantees it.
 
 ```mermaid
 classDiagram
@@ -192,10 +216,11 @@ classDiagram
 
 ## Python API contract
 
-The following functions are signatures only at present; all raise
-`NotImplementedError` before performing gameplay or input parsing.
+`new_game`, `observe`, `legal_actions`, and `step` are implemented. The remaining
+random-player and CLI functions are interface stubs that raise
+`NotImplementedError` before selecting an action or parsing input.
 
-| Function | Required behavior once implemented |
+| Function | Contract |
 | --- | --- |
 | `new_game(n: int) -> GameState` | Reject nonpositive or noninteger `n`, including booleans, with `ValueError`; create the agreed initial state |
 | `observe(state: GameState, player: Player) -> Observation` | Return the current player's three stacks, own hand, and public winner; reject an invalid player with `ValueError` |
@@ -205,6 +230,18 @@ The following functions are signatures only at present; all raise
 | `run_replay(data: dict[str, object]) -> dict[str, object]` | Validate the entire input before running; execute its explicit schedule and return the report below |
 | `run_random(n: int, seed: int, max_steps: int) -> dict[str, object]` | Validate parameters; use one local seeded RNG and fresh observations for alternating A/B turns; return the report below |
 | `main() -> int` | Parse CLI input, report input failures, and serialize one run report; return the process exit status |
+
+The core can already execute the assignment's example directly:
+
+```python
+from hanoi_crossing import Action, new_game, step
+
+state = new_game(1)
+state = step(state, "A", Action("lift", "1a")).state
+state = step(state, "B", Action("lift", "1b")).state
+result = step(state, "A", Action("place", "3a"))
+assert result.error is None and result.state.winner == "A"
+```
 
 Canonical action order is `skip` first, followed by all legal lifts when the hand
 is empty, or all legal places when it is occupied. Candidate poles are always
@@ -382,5 +419,13 @@ validation, public exports, and function stubs following that diagram.
 Codex also assisted with rule discussions, input/output documentation, model and
 contract tests, example fixtures, and repository guidance in `AGENTS.md`.
 A Codex subagent reviewed the rules, model boundaries, and contract consistency.
-Full gameplay and frontend behavior are still pending; model/contract checks are
-not represented as full game acceptance tests.
+
+For the core implementation, Xiaokang Yin provided the core game rules and
+corner cases. Codex carried out the implementation task based on those supplied
+requirements: implementing the four engine functions, winner-consistency
+validation, and the physical-line guard, and translating the supplied corner
+cases into direct engine regression tests. Focused Codex subagents helped write
+the gameplay tests and independently reviewed the core implementation.
+
+Random-player and frontend behavior are still pending. Direct engine checks are
+not full assignment acceptance tests.

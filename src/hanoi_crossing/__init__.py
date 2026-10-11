@@ -1,4 +1,4 @@
-"""Public immutable models and the planned engine API."""
+"""Public immutable models and the game engine API."""
 
 from .engine import (
     Action,

@@ -1,4 +1,4 @@
-"""Model and interface checks, not acceptance tests for pending gameplay."""
+"""Model invariants and engine input-boundary tests."""
 
 from dataclasses import FrozenInstanceError, fields
 import inspect
@@ -116,16 +116,76 @@ class ModelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             game.StepResult(self.state, "unknown")
 
-    def test_engine_interfaces_are_explicit_stubs(self):
+    def test_engine_interfaces_keep_their_signatures_and_return_models(self):
         calls = (
-            (game.new_game, (1,), ("n",)),
-            (game.observe, (self.state, "A"), ("state", "player")),
-            (game.legal_actions, (self.view,), ("observation",)),
+            (game.new_game, (1,), ("n",), game.GameState),
+            (game.observe, (self.state, "A"), ("state", "player"), game.Observation),
+            (game.legal_actions, (self.view,), ("observation",), tuple),
             (game.step, (self.state, "A", game.Action("skip")),
-             ("state", "player", "action")),
+             ("state", "player", "action"), game.StepResult),
         )
-        for function, args, parameters in calls:
+        for function, args, parameters, result_type in calls:
             with self.subTest(function=function.__name__):
                 self.assertEqual(tuple(inspect.signature(function).parameters), parameters)
-                with self.assertRaisesRegex(NotImplementedError, function.__name__):
-                    function(*args)
+                self.assertIs(type(function(*args)), result_type)
+
+    def test_new_game_rejects_invalid_disk_counts(self):
+        for n in (None, True, False, 0, -1, 1.0, "1", [], {}):
+            with self.subTest(n=n):
+                with self.assertRaises(ValueError):
+                    game.new_game(n)
+
+    def test_engine_rejects_invalid_models_and_players_before_rule_checks(self):
+        terminal = game.GameState(((), (), (), (1,), ()), (None, 2), "A")
+        for state in (self.state, terminal):
+            for player in (None, True, 0, "a", "C", [], {}):
+                with self.subTest(state=state, player=player):
+                    with self.assertRaises(ValueError):
+                        game.observe(state, player)
+                    with self.assertRaises(ValueError):
+                        game.step(state, player, game.Action("skip"))
+            for action in (None, "skip", {"kind": "skip"}, self.view):
+                with self.subTest(state=state, action=action):
+                    with self.assertRaises(ValueError):
+                        game.step(state, "A", action)
+        for invalid in (None, True, {}, (), self.view):
+            with self.subTest(state=invalid):
+                with self.assertRaises(ValueError):
+                    game.observe(invalid, "A")
+                with self.assertRaises(ValueError):
+                    game.step(invalid, "A", game.Action("skip"))
+        for invalid in (None, True, {}, (), self.state):
+            with self.subTest(observation=invalid):
+                with self.assertRaises(ValueError):
+                    game.legal_actions(invalid)
+
+    def test_state_constructor_rejects_inconsistent_cached_winners(self):
+        for winner in game.PLAYERS:
+            with self.subTest(false_winner=winner):
+                with self.assertRaises(ValueError):
+                    game.GameState(self.state.poles, self.state.hands, winner)
+        for actual, poles in (
+            ("A", ((), (2,), (), (1,), ())),
+            ("B", ((1,), (), (), (), (2,))),
+        ):
+            for supplied in (None, "A", "B"):
+                with self.subTest(actual=actual, supplied=supplied):
+                    if actual == supplied:
+                        self.assertEqual(game.GameState(poles, (None, None), supplied).winner,
+                                         actual)
+                    else:
+                        with self.assertRaises(ValueError):
+                            game.GameState(poles, (None, None), supplied)
+
+    def test_state_constructor_rejects_simultaneous_winners_without_tiebreak(self):
+        for winner in (None, "A", "B"):
+            with self.subTest(winner=winner):
+                with self.assertRaisesRegex(ValueError, "both players"):
+                    game.GameState(((), (), (), (1,), (2,)), (None, None), winner)
+
+    def test_constructor_does_not_attempt_historical_reachability_validation(self):
+        state = game.GameState(((2, 1), (3,), (4,), (5,), (6,)), (7, 8))
+        self.assertIsNone(state.winner)
+        for player in game.PLAYERS:
+            self.assertEqual(game.legal_actions(game.observe(state, player)),
+                             (game.Action("skip"),))
