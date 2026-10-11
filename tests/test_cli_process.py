@@ -1,6 +1,6 @@
 """Registered CLI execution and narrow process error boundaries."""
 
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import chdir, redirect_stderr, redirect_stdout
 from io import StringIO
 import json
 from pathlib import Path
@@ -19,6 +19,9 @@ EXAMPLES = ROOT / "examples"
 
 
 class CliProcessTests(unittest.TestCase):
+    def setUp(self):
+        self.run_dir = self.enterContext(tempfile.TemporaryDirectory())
+
     @classmethod
     def setUpClass(cls):
         cls.command = shutil.which("hanoi-crossing", path=sysconfig.get_path("scripts"))
@@ -26,7 +29,7 @@ class CliProcessTests(unittest.TestCase):
             raise AssertionError("hanoi-crossing entry point missing; run uv sync --locked")
 
     def run_cli(self, *args):
-        return subprocess.run([self.command, *map(str, args)], cwd=ROOT,
+        return subprocess.run([self.command, *map(str, args)], cwd=self.run_dir,
                               capture_output=True, text=True, timeout=10)
 
     def test_replay_command_matches_fixture(self):
@@ -109,6 +112,7 @@ class CliProcessTests(unittest.TestCase):
 
 class MainBoundaryTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(chdir(self.enterContext(tempfile.TemporaryDirectory())))
         args = ["hanoi-crossing", "random", "--n", "1", "--seed", "42", "--max-steps", "1"]
         self.argv = patch("sys.argv", args)
         self.argv.start()
@@ -116,14 +120,14 @@ class MainBoundaryTests(unittest.TestCase):
 
     def test_keyboard_interrupt_returns_130_without_a_report(self):
         out, err = StringIO(), StringIO()
-        with patch.object(cli, "run_random", side_effect=KeyboardInterrupt), \
+        with patch.object(cli, "_random_episode", side_effect=KeyboardInterrupt), \
                 redirect_stdout(out), redirect_stderr(err):
             self.assertEqual(cli.main(), 130)
         self.assertEqual(out.getvalue(), "")
         self.assertIn("interrupted", err.getvalue())
 
     def test_internal_value_errors_are_not_misclassified_as_input(self):
-        for function in ("run_random", "json.dumps"):
+        for function in ("_random_episode", "json.dumps"):
             out, err = StringIO(), StringIO()
             with self.subTest(function=function):
                 with patch(f"hanoi_crossing.cli.{function}", side_effect=ValueError("bug")), \

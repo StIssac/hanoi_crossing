@@ -6,9 +6,9 @@ This repository uses uv and the Python standard library.
 **Current status:** the core engine implements initialization, player observations,
 legal-action enumeration, atomic transitions, input validation, and adjudication.
 Fixed player-relative action IDs, bidirectional conversions, replay, uniform
-random play, human-versus-random terminal play, and the registered CLI are
-implemented. Tests exercise the engine directly, batch runners, interactive
-behavior, and the actual command-line entry point.
+random play, human-versus-random play, local hot-seat PvP, observation-only
+agents, and automatic Episode archives are implemented. Tests exercise the
+engine directly, batch runners, interaction, archives, and registered CLI.
 
 ## Setup
 
@@ -50,8 +50,9 @@ checkouts can use the usual project-local `.venv` created by `uv sync`.
 src/hanoi_crossing/
     __init__.py          # Public engine interface
     engine.py            # State, observations, legal actions, and transitions
-    random_player.py     # Random player using the external-agent interface
-    cli.py               # Replay, random-play, and interactive frontends
+    agents.py            # AgentBase and immutable Decision (counts toward core)
+    random_player.py     # Uniform random policy and RandomAgent adapter
+    cli.py               # Frontends, shared scheduling, Episode records and I/O
 tests/
     test_engine.py
     test_gameplay.py
@@ -61,16 +62,23 @@ tests/
     test_cli.py
     test_cli_process.py
     test_interactive.py
+    test_agents.py
+    test_episodes.py
+    test_pvp.py
 examples/
     replay.json          # N=1 contract input from the assignment example
     replay.expected.json # Hand-authored expected report checked against the CLI
+runs/                    # Per-game referee archives; ignored by Git
+docs/
+    DATASET_GUIDE.md      # Data collection and future training interpretation
 ```
 
-All models, validation, rules, and adjudication belong in `engine.py`; `__init__.py`
-exports its public interface. Both files count toward the core limit of **fewer
-than 500 physical Python lines**, including comments and blank lines. Any future
-module containing engine logic also counts. The CLI handles I/O, scheduling,
-run limits, and reports. The random player receives only an observation and an
+Game models, validation, rules, and adjudication belong in `engine.py`;
+`__init__.py` exports its public interface. These files and `agents.py` count
+toward the core limit of **fewer than 500 physical Python lines**, including
+comments and blank lines. Any future module containing engine logic also counts.
+The CLI handles I/O, scheduling, run limits, reports, and Episode records.
+The random player receives only an observation and an
 injected `random.Random` instance. There is no engine-owned RNG, scheduler, I/O,
 HTTP service, or RL training implementation.
 
@@ -122,7 +130,7 @@ strategies can prevent progress indefinitely.
 
 ## Data model
 
-All four classes are `@dataclass(frozen=True, slots=True)`. Stored collections
+All four engine classes are `@dataclass(frozen=True, slots=True)`. Stored collections
 must be tuples, including each nested stack; mutable inputs are rejected rather
 than retained or silently converted. Empty stacks are `()`, empty hands are
 `None`, and **every stack runs bottom to top**, so its last item is the top disk.
@@ -209,16 +217,52 @@ classDiagram
         +choose_action(observation, rng) Action
     }
 
+    class AgentBase {
+        <<abstract>>
+        +reset(player, n)
+        +act(observation) Decision
+    }
+
+    class Decision {
+        <<dataclass>>
+        +int action_id
+        +FloatOrNone log_prob
+        +FloatOrNone value
+    }
+
+    class RandomAgent {
+        +Random rng
+        +act(observation) Decision
+    }
+
+    class HumanAgent {
+        +act(observation) Decision
+    }
+
+    class Episode {
+        <<internal>>
+        +metadata
+        +events
+        +end
+    }
+
     class cli {
         <<module>>
         +main()
         +run_replay(data)
         +run_random(n, seed, max_steps)
         +run_interactive(n, human, seed, max_steps)
+        +run_pvp(n, max_steps)
     }
 
     cli ..> engine : initialize, observe, step
-    cli ..> random_player : request an action
+    cli ..> AgentBase : reset and request a decision
+    cli ..> Episode : record and archive
+    AgentBase <|-- RandomAgent
+    AgentBase <|-- HumanAgent
+    AgentBase ..> Observation : receive only player view
+    AgentBase ..> Decision : return fixed action ID
+    RandomAgent ..> random_player : reuse uniform policy
     random_player ..> engine : list legal actions
 
     engine ..> GameState : create initial state
@@ -231,8 +275,10 @@ classDiagram
 ## Python API contract
 
 All functions below are implemented. `run_replay` and `run_random` do not print,
-read files, or exit the process. `main` handles batch process I/O and delegates
-interactive terminal I/O to `run_interactive`. Runner input errors raise
+read files, or exit the process. They project the internally recorded Episode
+into the original report. `run_interactive` and `run_pvp` perform terminal I/O
+without archiving files; `main` shares their scheduling and owns file I/O.
+Episode builders are internal APIs. Runner input errors raise
 `InputError`, a `ValueError` subclass defined in `cli.py`.
 
 | Function                                                                  | Contract                                                                                                                                                    |
@@ -247,6 +293,7 @@ interactive terminal I/O to `run_interactive`. Runner input errors raise
 | `run_replay(data: dict[str, object]) -> dict[str, object]`              | Validate the entire input before running; execute its explicit schedule and return the report below                                                         |
 | `run_random(n: int, seed: int, max_steps: int) -> dict[str, object]`    | Validate parameters; use one local seeded RNG and fresh observations for alternating A/B turns; return the report below                                     |
 | `run_interactive(n: int, human: Player, seed: int, max_steps: int) -> int` | Validate parameters; alternate human and random turns; display only the human observation; return 0 on normal completion |
+| `run_pvp(n: int, max_steps: int) -> int` | Alternate two local humans with handoff confirmation; no file I/O; return 0 on normal completion or 130 on interruption |
 | `main() -> int` | Parse CLI input, report input failures, and serialize a batch report or start interactive play; return the process exit status |
 
 The core can already execute the assignment's example directly:
@@ -298,8 +345,9 @@ For example, while holding a disk, ID 1 still decodes to `lift_start`; passing
 it to `step` returns `hand_full`. Legal actions may then have IDs `(0, 4, 5, 6)`:
 the second entry has ID 4, not ID 1. During ongoing play ID 0 is always legal;
 terminal `legal_actions` returns `()`, although the conversions still work.
-A future action mask can mark these seven IDs using the current observation's
-legal actions; no mask or training framework is implemented here.
+Episode records mark these seven IDs with a boolean action mask derived solely
+from the acting player's observation and legal actions. No training framework
+is implemented here.
 
 Decoding rejects booleans, nonintegers, negative IDs, and IDs above 6 with
 `ValueError`. Both conversions reject invalid players. Encoding another player's
@@ -332,39 +380,63 @@ This order avoids inspecting or disclosing a hidden pole's contents. Skip has
 no target or hand precondition during ongoing play. Input validation precedes
 these rule checks, including for terminal calls.
 
-### Observation delivery and random play
+### Agent protocol and observation delivery
 
-The runner holds the complete referee state. On **each** turn it selects the
-actor externally, calls `observe`, and passes that `Observation` to the same
-`choose_action` function used for either player. The strategy receives no
-`GameState`. Obtaining an observation and applying its selected action must not
-be interleaved with another action in that same game. A future service must
-serialize those operations per game outside this engine; different game states
-and RNG instances remain independent.
+`AgentBase` and `Decision` are imported from `hanoi_crossing.agents`.
+`reset(self, *, player: Player, n: int) -> None` sets public context and is called
+once on each player's separate agent instance at the start of every game.
+Stateful subclasses must call the base method and clear their own per-game
+memory. `act(self, observation: Observation) -> Decision` receives only the
+acting player's immutable observation, never `GameState`, an Episode, or an
+opponent's view. The runner stops before another `act` once a winner exists.
+
+`Decision` is a frozen, slotted dataclass with `action_id`, `log_prob=None`, and
+`value=None`. IDs must be integers 0 through 6, excluding booleans. Optional
+policy values must be finite numbers, not booleans; absent values stay null,
+not invented zeros. These values describe the actual sampled action if supplied.
+
+`RandomAgent` in `random_player.py` wraps `choose_action` and converts its action
+to the fixed ID. A random game uses two agents and one shared `Random(seed)`;
+reset never reseeds it. The sampling order and old seeded trajectories are
+unchanged. `HumanAgent` in `cli.py` reads terminal decisions; quit and EOF are
+control signals, not decisions. Human illegal actions are recorded attempts.
+Any rejected automated-agent decision is an implementation error, never a retry.
+
+Random, play, and PvP share one alternating scheduler. Replay keeps its explicit
+actor order and raw actions, bypassing agents while reusing the same step and
+record path. Observing and applying an action must not interleave with another
+turn in the same game. Game state and per-game RNGs remain independent.
 
 ```mermaid
 sequenceDiagram
     participant R as Runner (cli.py)
     participant E as Engine (engine.py)
-    participant P as Random policy (random_player.py)
+    participant P as Acting Agent
+    participant D as Episode
 
+    R->>P: reset(player, n) once per player
     R->>E: new_game(n)
     E-->>R: Initial GameState
 
     loop No winner and step limit not reached
         Note over R: Select A or B from the external schedule
+        opt Local PvP
+            Note over R: Clear screen and confirm handoff before displaying view
+        end
         R->>E: observe(state, player)
         E-->>R: Current player's Observation
-
-        R->>P: choose_action(observation, rng)
-        P->>E: legal_actions(observation)
-        E-->>P: ActionList
-        P-->>R: Randomly selected Action
+        R->>P: act(observation)
+        P-->>R: Decision with fixed action ID
+        R->>E: action_from_id(player, action_id)
+        E-->>R: Action
 
         R->>E: step(state, player, action)
         E-->>R: StepResult
-        Note over R: Update state and check winner
+        R->>D: Record pre-action view, mask, action and result
+        Note over R,D: Commit state and event count together, then check winner
     end
+    R->>D: Finalize termination, truncation, abort or agent failure
+    Note over R,D: CLI alone publishes the archive; batch output keeps its old shape
 ```
 
 ## Input and output
@@ -373,7 +445,9 @@ Replay accepts a UTF-8 JSON file containing the recorded moves and turn order.
 Random play accepts command-line parameters. These two batch frontends return
 the same JSON run-report structure, with an additional seed field for random
 play. Interactive `play` reads terminal actions and displays text from the
-human player's observation.
+human player's observation. `pvp` alternates two local humans. Every successfully
+started CLI game that ends normally or through quit/EOF/handled interruption
+saves a referee Episode; Python calls do not automatically write files.
 
 Run a frontend after setup:
 
@@ -381,6 +455,7 @@ Run a frontend after setup:
 uv run hanoi-crossing replay examples/replay.json
 uv run hanoi-crossing play --n 3 --human A --seed 42 --max-steps 1000
 uv run hanoi-crossing random --n 5 --seed 42 --max-steps 10000
+uv run hanoi-crossing pvp --n 3 --max-steps 1000
 ```
 
 ### Input: replay file
@@ -462,6 +537,135 @@ The interactive frontend owns terminal I/O and returns a process status; it
 does not emit the full referee JSON report. `run_replay` and `run_random` remain
 I/O-free functions.
 
+### Input and output: local PvP
+
+`pvp --n 3 --max-steps 1000` requires positive integer `n` and `max_steps`, with
+no seed. Python callers must not pass booleans. A starts, then B; one lift,
+place, or skip is one turn. Before every turn the CLI clears a TTY's current
+screen and asks the next player to press Enter. Only after confirmation does it
+show that player's observation and request an action. Terminal redirects retain
+plain text without escape codes. The action/help/error behavior matches `play`.
+At the handoff prompt, q/quit, EOF and Ctrl-C also abort; other nonempty text
+repeats the confirmation without a turn. No next player's view is shown on a
+win or step limit. The ending message contains only the public result and count.
+
+Hot-seat play relies on both players voluntarily looking away. Clearing the
+screen is not a security boundary: scrollback, redirected output, recordings
+and bystanders can expose previous views. There is no remote client or network
+isolation. The saved archive contains both players' information for the referee;
+it is never passed to an Agent or dumped on the PvP player screen.
+
+### Output: Episode archive
+
+The registered CLI saves one UTF-8 JSON file at `runs/<episode_id>.json`, relative
+to its working directory. `episode_id` is a fresh UUID4. `runs/` is ignored by Git;
+there is currently no archive-directory or disable-archive option. Batch stdout
+remains the original report below; archive contents and paths are not printed.
+Collection and interpretation are covered in [the dataset guide](docs/DATASET_GUIDE.md).
+
+The archive has exactly five top-level fields:
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version` | `"hanoi-crossing-episode-v1"` |
+| `episode_id` | UUID string also used as the filename |
+| `metadata` | Game parameters, schedule, versions and agent provenance |
+| `events` | Completed, committed `step` attempts in order |
+| `end` | Final referee state, termination classification and unexecuted replay tail |
+
+`metadata` fields are fixed for this schema:
+
+| Field | Meaning |
+| --- | --- |
+| `n`, `mode` | Positive disk count; `replay`, `random`, `play`, or `pvp` |
+| `seed` | Supplied integer for random/play; null for replay/PvP |
+| `max_steps` | Positive attempt limit; null for replay, whose input sequence is the limit |
+| `schedule` | `{"kind":"alternating","first":"A"}` or `{"kind":"explicit","players":[...]}` containing the complete replay actor sequence |
+| `versions` | `{"rules":"hanoi-crossing-v1","action_ids":"v1","observation":"v1"}` |
+| `source_sha256` | Hash of sorted package `.py` filenames and bytes, each followed by a NUL byte; identifies local source including uncommitted code. Null if unavailable or built through internal Python runners without CLI enrichment |
+| `python_version` | Actual running Python version |
+| `agents` | A/B objects with `type` and `policy_version`: `RandomAgent`/`uniform-v1`, `HumanAgent`/`terminal-v1`, or `Replay`/null. Unknown policy versions are null |
+
+Each event contains `ply` (zero-based), `player`, the **pre-action**
+`observation`, `action_mask`, original `action`, derived `action_id`, `error`,
+and `policy_data`. Observation encoding uses `player`, `visible_poles` (three
+bottom-to-top arrays), `hand`, and `winner`. The mask always has seven booleans
+in fixed ID order 0 through 6, computed solely from that observation's legal
+actions. An ID can be encoded even when its mask entry is false.
+
+`action` is the replay authority. A replay action targeting a private opponent
+pole remains unchanged, with `action_id=null` and `error="invisible_pole"`.
+Other encoded IDs must agree with their raw actions. Rule errors and skips
+count as events; help, malformed terminal input, handoff confirmations and
+aborts do not. `policy_data` is null unless the Decision supplied at least one
+policy value; otherwise it contains `log_prob` and `value`, retaining null for
+whichever was absent. Current RandomAgent and HumanAgent supply neither value.
+
+For example, the first `lift_start` by A at n=2 is:
+
+```json
+{
+  "ply": 0,
+  "player": "A",
+  "observation": {
+    "player": "A", "visible_poles": [[3, 1], [], []],
+    "hand": null, "winner": null
+  },
+  "action_mask": [true, true, false, false, false, false, false],
+  "action": {"kind": "lift", "pole": "1a"},
+  "action_id": 1, "error": null, "policy_data": null
+}
+```
+
+`end` contains `final_state` (same full referee structure as report `state`),
+`winner`, `status`, `stop_reason`, `steps_consumed`, and `unexecuted_turns`.
+`steps_consumed == len(events)`. The replay tail is preserved but is not part of
+the executed transitions; other modes have an empty tail.
+
+| `status` | `stop_reason` | Meaning |
+| --- | --- | --- |
+| `terminated` | `winner` | A real game winner; takes precedence over the step limit |
+| `truncated` | `max_steps` or `sequence_exhausted` | No winner; not a game-defined draw |
+| `aborted` | `quit`, `eof`, or `interrupted` | No winner; the person quitting is not declared the loser |
+| `failed` | `agent_error` | An automated agent submitted a rule-illegal action; retain that step and fail without retrying |
+
+The runner commits state and event count together. An interruption during a
+step that has not reached that checkpoint discards that in-flight step; the
+archive remains replayable from `n` and its completed `player/action` sequence.
+Quit/EOF exits with 0; a handled Ctrl-C saves the checkpoint and exits with 130.
+A winner already committed remains a true terminal result, even if a subsequent
+interrupt prevents final display. Python batch APIs propagate KeyboardInterrupt
+rather than returning a changed report shape. Invalid initial input starts no
+game and creates no Episode. A rule-illegal automated-agent attempt is saved
+as failed and the CLI exits with 1; Python runners raise RuntimeError. Other
+unexpected agent/engine failures propagate rather than producing a misleading
+completed archive.
+
+Before publishing, the CLI serializes the complete document, writes and flushes
+a temporary file in the same directory, then uses an atomic hard link to publish
+it without overwriting an existing path. It removes only its own temporary file.
+Publication therefore requires filesystem hard-link support. A save failure
+produces a diagnostic and nonzero exit; no success is reported. A later stdout
+failure can leave a valid saved archive while still returning a failing process
+status. During final serialization/publication, the CLI defers SIGINT until the
+archive is complete, restores the previous handler, and then exits with 130.
+Such an interrupt does not undo a game outcome already recorded. This is
+end-of-game persistence, not a crash-resilient live event journal.
+
+### Future training interpretation
+
+Ply logs are not ready-made PPO batches. For player A, `next_observation` must
+be A's next actual decision view (or a terminal view), not B's next event or the
+intermediate state immediately after A's own action. Read the recorded actor;
+replay schedules need not alternate. Derive terminal rewards from `winner`, not
+the last actor: one player's move can make the other player win.
+
+A future adapter must construct same-player transitions and define rewards,
+termination versus truncation, and bootstrap behavior. Training cutoffs belong
+at complete decision boundaries; an arbitrary run limit may leave a player's
+transition incomplete. No RL wrapper, recurrent state, reward shaping, training
+exporter, or trainer is implemented here.
+
 ### Output: run report
 
 Both runners return a JSON-compatible dictionary. JSON object key order and
@@ -508,13 +712,15 @@ fixture is compared with actual `run_replay` and registered CLI output in tests.
 
 Successful replay/random execution serializes the complete report before
 writing exactly one JSON document to stdout. Interactive play writes prompts,
-observations, and game messages to stdout. Process diagnostics go to stderr.
+observations, and game messages to stdout. CLI completion also saves its Episode.
+Process diagnostics go to stderr; a handled interrupted batch emits no report.
 
 | Outcome                                                                  | Exit status                       |
 | ------------------------------------------------------------------------ | --------------------------------- |
 | Finished run, including no winner, interactive quit or EOF               | `0`                             |
 | Invalid arguments, replay schema/JSON, unreadable file, or invalid UTF-8 | `2`                             |
-| Terminal read, output write or flush failure handled by`main`          | `1`                             |
+| Terminal read/write/flush or archive failure handled by `main`          | `1`                             |
+| Rule-illegal automated-agent attempt, archived as failed               | `1`                             |
 | Keyboard interrupt                                                       | `130`                           |
 | Unexpected internal exception                                            | Nonzero; the exception propagates |
 
@@ -545,5 +751,6 @@ Xiaokang Yin requested fixed action IDs in the first version. Codex implemented
 the player-relative conversions, public exports, documentation, and regression
 tests for that requirement.
 
-Xiaokang Yin provided the CLI design for replay, random play, and
-human-versus-random interaction. Codex implemented the CLI based on that design.
+Xiaokang Yin provided the CLI design for replay, random play,
+human-versus-random interaction, local PvP, and Episode archiving.
+Codex implemented the CLI based on that design.

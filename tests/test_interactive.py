@@ -1,20 +1,25 @@
 """Direct behavior tests for the human/random interactive frontend."""
 
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import chdir, redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import sysconfig
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
 import hanoi_crossing.cli as cli
+from hanoi_crossing import random_player
 from hanoi_crossing import Action, step
 
 
 class InteractiveTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(chdir(self.enterContext(TemporaryDirectory())))
+
     def test_all_fixed_action_ids_decode_for_each_human_player(self):
         expected = {
             "A": (
@@ -43,7 +48,7 @@ class InteractiveTests(unittest.TestCase):
                     max_steps = 1 if human == "A" else 2
                     with (
                         patch("builtins.input", return_value=str(action_id)),
-                        patch.object(cli, "choose_action", return_value=Action("skip")),
+                        patch.object(random_player, "choose_action", return_value=Action("skip")),
                         patch.object(cli.engine, "step", wraps=step) as step_spy,
                         redirect_stdout(output),
                     ):
@@ -81,7 +86,7 @@ class InteractiveTests(unittest.TestCase):
         output = StringIO()
         with (
             patch("builtins.input", side_effect=("1", "q")),
-            patch.object(cli, "choose_action", return_value=Action("skip")),
+            patch.object(random_player, "choose_action", return_value=Action("skip")),
             redirect_stdout(output),
         ):
             cli.run_interactive(1, "A", 42, 3)
@@ -152,7 +157,7 @@ class InteractiveTests(unittest.TestCase):
         output = StringIO()
         with (
             patch("builtins.input", side_effect=("0", "q")),
-            patch.object(cli, "choose_action", return_value=Action("skip")) as choose,
+            patch.object(random_player, "choose_action", return_value=Action("skip")) as choose,
             patch.object(cli.engine, "step", wraps=step) as step_spy,
             redirect_stdout(output),
         ):
@@ -191,7 +196,7 @@ class InteractiveTests(unittest.TestCase):
 
                 with (
                     patch("builtins.input", side_effect=inputs),
-                    patch.object(cli, "choose_action", side_effect=choose_computer),
+                    patch.object(random_player, "choose_action", side_effect=choose_computer),
                     redirect_stdout(output),
                 ):
                     status = cli.run_interactive(1, human, 42, 3)
@@ -214,7 +219,7 @@ class InteractiveTests(unittest.TestCase):
         output = StringIO()
         with (
             patch("builtins.input", side_effect=("1", "6")),
-            patch.object(cli, "choose_action", return_value=Action("lift", "1b")),
+            patch.object(random_player, "choose_action", return_value=Action("lift", "1b")),
             redirect_stdout(output),
         ):
             status = cli.run_interactive(1, "A", 42, 3)
@@ -235,7 +240,7 @@ class InteractiveTests(unittest.TestCase):
 
         with (
             patch("builtins.input", side_effect=("1", "5", "2")),
-            patch.object(cli, "choose_action", side_effect=choose_computer),
+            patch.object(random_player, "choose_action", side_effect=choose_computer),
             redirect_stdout(output),
         ):
             status = cli.run_interactive(1, "A", 42, 5)
@@ -251,7 +256,7 @@ class InteractiveTests(unittest.TestCase):
         output = StringIO()
         with (
             patch("builtins.input", return_value="0"),
-            patch.object(cli, "choose_action", return_value=Action("skip")),
+            patch.object(random_player, "choose_action", return_value=Action("skip")),
             patch.object(cli.engine, "step", wraps=step) as step_spy,
             redirect_stdout(output),
         ):
@@ -266,7 +271,7 @@ class InteractiveTests(unittest.TestCase):
         output = StringIO()
         with (
             patch("builtins.input", side_effect=EOFError),
-            patch.object(cli, "choose_action", return_value=Action("skip")) as choose,
+            patch.object(random_player, "choose_action", return_value=Action("skip")) as choose,
             patch.object(cli.engine, "step", wraps=step) as step_spy,
             redirect_stdout(output),
         ):
@@ -299,7 +304,7 @@ class InteractiveTests(unittest.TestCase):
         output = StringIO()
         with (
             patch("builtins.input", return_value="0"),
-            patch.object(cli, "choose_action", return_value=Action("lift", "1a")) as choose,
+            patch.object(random_player, "choose_action", return_value=Action("lift", "3b")) as choose,
             redirect_stdout(output),
         ):
             with self.assertRaises(RuntimeError):
@@ -330,7 +335,7 @@ class InteractiveTests(unittest.TestCase):
                 with (
                     patch.object(sys, "argv", argv),
                     patch("builtins.input", return_value=human_input),
-                    patch.object(cli, "choose_action", side_effect=computer_actions or None,
+                    patch.object(random_player, "choose_action", side_effect=computer_actions or None,
                                  return_value=Action("skip")),
                     redirect_stdout(output),
                 ):
@@ -364,6 +369,7 @@ class InteractiveTests(unittest.TestCase):
 
 class InteractiveMainBoundaryTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(chdir(self.enterContext(TemporaryDirectory())))
         self.argv = patch.object(
             sys,
             "argv",
@@ -375,7 +381,7 @@ class InteractiveMainBoundaryTests(unittest.TestCase):
     def test_keyboard_interrupt_returns_130(self):
         output, error = StringIO(), StringIO()
         with (
-            patch.object(cli, "run_interactive", side_effect=KeyboardInterrupt),
+            patch.object(cli, "_interactive_episode", side_effect=KeyboardInterrupt),
             redirect_stdout(output),
             redirect_stderr(error),
         ):
@@ -415,6 +421,9 @@ class InteractiveMainBoundaryTests(unittest.TestCase):
 
 
 class InteractiveProcessTests(unittest.TestCase):
+    def setUp(self):
+        self.run_dir = self.enterContext(TemporaryDirectory())
+
     @classmethod
     def setUpClass(cls):
         cls.root = Path(__file__).resolve().parents[1]
@@ -432,7 +441,7 @@ class InteractiveProcessTests(unittest.TestCase):
                 "--max-steps", "1000",
             ],
             input="h\nx\n1\n1\n6\nq\n",
-            cwd=self.root,
+            cwd=self.run_dir,
             capture_output=True,
             text=True,
             timeout=10,

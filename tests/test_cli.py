@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 import hanoi_crossing.cli as cli
+from hanoi_crossing import random_player
 from hanoi_crossing import Action, observe
 from hanoi_crossing.cli import InputError, main, run_random, run_replay
 
@@ -229,7 +230,7 @@ class CliRunnerTests(unittest.TestCase):
                 self.assertIn(path, str(caught.exception))
 
     def test_random_run_stops_at_limit_without_winner(self):
-        with patch.object(cli, "choose_action", return_value=Action("skip")) as choose:
+        with patch.object(random_player, "choose_action", return_value=Action("skip")) as choose:
             report = run_random(1, 17, 4)
 
         self.assertEqual(report["state"], INITIAL_N1)
@@ -266,7 +267,7 @@ class CliRunnerTests(unittest.TestCase):
 
         with (
             patch.object(cli.engine, "observe", side_effect=capture_observation) as observe_spy,
-            patch.object(cli, "choose_action", side_effect=choose_skip) as choose_spy,
+            patch.object(random_player, "choose_action", side_effect=choose_skip) as choose_spy,
         ):
             report = run_random(1, 42, 4)
 
@@ -288,7 +289,7 @@ class CliRunnerTests(unittest.TestCase):
             Action("lift", "1b"),
             Action("place", "3a"),
         )
-        with patch.object(cli, "choose_action", side_effect=actions) as choose:
+        with patch.object(random_player, "choose_action", side_effect=actions) as choose:
             report = run_random(1, 9, 3)
 
         self.assertEqual(choose.call_count, 3)
@@ -327,7 +328,7 @@ class CliRunnerTests(unittest.TestCase):
             self.assertEqual(replay_report["stop_reason"], "sequence_exhausted")
 
     def test_random_runner_rejects_illegal_strategy_action_without_retry(self):
-        with patch.object(cli, "choose_action", return_value=Action("lift", "1b")) as choose:
+        with patch.object(random_player, "choose_action", return_value=Action("lift", "3a")) as choose:
             with self.assertRaises(RuntimeError):
                 run_random(1, 42, 10)
 

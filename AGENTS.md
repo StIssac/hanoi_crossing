@@ -10,9 +10,9 @@
 - The current repository implements immutable models and the four core engine
   functions: initialization, observation, legal actions, and atomic transitions
   with adjudication, plus fixed player-relative action IDs and conversions.
-  Uniform random selection, replay and random runners, human-versus-random
-  terminal play, and the registered CLI are also implemented. Keep direct
-  engine, runner, and real CLI checks distinct.
+  Uniform random selection, replay/random runners, human-versus-random play,
+  local hot-seat PvP, observation-only Agents, and Episode archives are also
+  implemented. Keep direct engine, runner, and real CLI checks distinct.
 - Implement only the requested scope. Do not add an intelligent strategy or
   other future features. Update the README when observable behavior changes.
 - Treat the supplied assignment as requirements to interpret, not permission to
@@ -46,7 +46,8 @@
   directly to `step` still returns `invisible_pole` during ongoing play.
   Keep replay JSON in its existing `kind/pole` format.
 - The CLI owns parsing, external turn order, run limits, RNG creation, and
-  serialization. Do not duplicate game rules in the CLI or random player.
+  serialization. It also records Episodes and owns archive file I/O. Do not
+  duplicate game rules in the CLI or random player.
 - Validate the complete replay, including an unexecuted tail, before `new_game`.
   Protocol failures raise `cli.InputError`; do not relabel runtime engine or
   serialization exceptions as input errors. Keep duplicate-key and nonstandard
@@ -56,23 +57,60 @@
   opponent's private poles, hand, or specific actions, even after a win.
   Valid action IDs reach `step` and consume attempts even when rejected. Help,
   malformed input, and quitting do not consume turns. A starts, players
-  alternate, and quitting/EOF declares no winner.
+  alternate, and quitting/EOF declares no winner. Local PvP requires explicit
+  handoff confirmation before observing/rendering the next player's view.
+  Clearing the terminal is convenience, not isolation from scrollback/bystanders.
+- Keep `AgentBase` and frozen/slotted `Decision` in `agents.py`, which counts
+  toward the core limit. Each player has a separate Agent, reset once per game
+  with only public player/n context. Stateful subclasses must clear their own
+  memory. `act` receives only the actor's Observation and returns a fixed ID;
+  no GameState, Episode, or opponent information. Optional log_prob/value must
+  be finite numbers or None; never fabricate missing values as zero.
+- `RandomAgent` belongs in `random_player.py` and reuses `choose_action`.
+  `HumanAgent` belongs in `cli.py`; quit/EOF are controls, never skip decisions.
+  Random/play/PvP share scheduling and recording. Replay retains its arbitrary
+  explicit actor sequence and kind/pole actions without going through Agents.
 - Random selection is exactly `rng.choice` over the complete legal action
   tuple, including skip, with no heuristic filtering or retries. Use one
   independent `Random(seed)` per run, shared by alternating A/B turns. Freshly
-  observe, select, and step on each turn. A rejected random action is a defect.
+  observe, select, and step on each turn. Agent reset never reseeds this RNG.
+  A rejected automated action is a defect: record the failed step, save a failed
+  archive in the CLI, exit nonzero, and never retry or emit a successful report.
 - Count skips and illegal replay actions as attempts. Stop immediately on any
   winner, including one created by the opponent's action or on the last allowed
   step. Exhaustion and step limits mean no winner, not an automatic draw.
 - Preserve state isolation across games. Any future service must serialize
-  observation/action processing per game outside the engine. Do not add an RL
-  environment, web service, strategy framework, or extra classes in anticipation
-  of that future work.
+  observation/action processing per game outside the engine. The approved
+  AgentBase/Decision adapters are the complete agent scope: no RL environment,
+  intelligent strategies, trainer, network PvP, database, or framework expansion.
+- Each Episode event is one committed step attempt with pre-action observation,
+  fixed seven-bit boolean mask, raw action, derived ID, and error. Build masks
+  only from that Observation and legal_actions. Preserve invisible replay actions
+  with action_id=None; do not discard the raw action or error. Record optional
+  policy data from the actual Decision, not reconstructed guesses.
+- State and trace length must share one checkpoint so interrupts cannot archive
+  an advanced state with a missing event or an uncommitted event with an old
+  state. Help/malformed input/control operations are not steps. Preserve the
+  unexecuted replay tail separately. Winner takes priority over limits.
+- Default CLI archives are UTF-8 `runs/<uuid>.json`, ignored by Git. Serialize
+  before writing, use a same-directory temporary file, flush, and publish
+  atomically without overwrite; clean only the current temporary file. Fail
+  explicitly on collision/write errors. Preserve batch stdout as one old-format
+  report; diagnostics belong on stderr. Never pass archives to Agents or dump
+  opponent information onto player screens. Python batch APIs perform no file I/O.
+- Archive status separates winner/terminated, limit-or-exhaustion/truncated,
+  quit-or-EOF-or-interrupt/aborted, and rule-illegal automated action/failed.
+  Handled Ctrl-C saves the last checkpoint and retains exit 130; no automatic
+  forfeit or draw. Unknown code/policy provenance is null, not an invented version.
+- Future RL conversion must link the same player's actual decision views,
+  read recorded actors rather than assuming parity, use winner rather than last
+  actor for rewards, and distinguish terminal/truncation/bootstrap. These archives
+  are not PPO batches; no RL adapter or training exporter is part of this scope.
 - Prefer the standard library and the smallest complete change. This project
   currently has no runtime dependencies. Do not add one for functionality the
   standard library already covers adequately.
 - Keep the core below 500 physical Python lines, including comments and blank
-  lines. Count `engine.py`, `__init__.py`, and any future module containing model,
+  lines. Count `engine.py`, `__init__.py`, `agents.py`, and any future module containing model,
   validation, rule, or adjudication logic. Moving rules elsewhere does not remove
   them from this count. `test_core_size.py` counts every package Python file
   except the two existing frontend modules, so new core helpers count by default.
@@ -100,6 +138,11 @@
 - Test the registered console entry point, stdout JSON, stderr diagnostics,
   and exit statuses. Preserve input rejection, no silent internal failures,
   output write/flush errors, and keyboard-interrupt handling.
+- Verify agent lifecycle, seeded trajectory parity, Episode replay (including
+  hidden actions), PvP handoff/abort boundaries, and archive collisions/errors.
+  All CLI tests must run in temporary working directories so automatic archives
+  never pollute the repository. Keep [the dataset guide](docs/DATASET_GUIDE.md)
+  aligned with the actual schema and public collection commands.
 - Keep `uv.lock` in Git. Do not commit environments, caches, generated artifacts,
   credentials, or unrelated changes. Keep the README AI-assistance disclosure
   accurate as work progresses.
@@ -112,7 +155,7 @@ Use uv with the Python version recorded in `.python-version`:
 uv sync --locked
 uv run --locked python -m unittest discover -s tests -v
 git diff --check
-wc -l src/hanoi_crossing/engine.py src/hanoi_crossing/__init__.py
+wc -l src/hanoi_crossing/engine.py src/hanoi_crossing/__init__.py src/hanoi_crossing/agents.py
 ```
 
 If core code is added to another module, include it in the line count. The
