@@ -1,0 +1,15 @@
+{
+  "state": {
+    "poles": {"1a": [], "1b": [], "2": [], "3a": [1], "3b": []},
+    "hands": {"A": null, "B": 2},
+    "winner": "A"
+  },
+  "steps_consumed": 3,
+  "stop_reason": "winner",
+  "steps": [
+    {"player": "A", "action": {"kind": "lift", "pole": "1a"}, "error": null},
+    {"player": "B", "action": {"kind": "lift", "pole": "1b"}, "error": null},
+    {"player": "A", "action": {"kind": "place", "pole": "3a"}, "error": null}
+  ],
+  "unexecuted_turns": []
+}

@@ -1,0 +1,8 @@
+{
+  "n": 1,
+  "turns": [
+    {"player": "A", "action": {"kind": "lift", "pole": "1a"}},
+    {"player": "B", "action": {"kind": "lift", "pole": "1b"}},
+    {"player": "A", "action": {"kind": "place", "pole": "3a"}}
+  ]
+}
