@@ -118,6 +118,8 @@ class ModelTests(unittest.TestCase):
 
     def test_engine_interfaces_keep_their_signatures_and_return_models(self):
         calls = (
+            (game.action_from_id, ("A", 0), ("player", "action_id"), game.Action),
+            (game.action_to_id, ("A", game.Action("skip")), ("player", "action"), int),
             (game.new_game, (1,), ("n",), game.GameState),
             (game.observe, (self.state, "A"), ("state", "player"), game.Observation),
             (game.legal_actions, (self.view,), ("observation",), tuple),

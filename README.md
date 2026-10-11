@@ -5,10 +5,10 @@ This repository uses uv and the Python standard library.
 
 **Current status:** the core engine implements initialization, player observations,
 legal-action enumeration, atomic transitions, input validation, and adjudication.
-Direct engine tests exercise those rules and the immutable models. Random action
-selection, replay, and CLI execution are **not implemented**; their functions
-still raise `NotImplementedError`. Their contracts below describe planned
-behavior, and the complete assignment is not yet finished.
+Fixed player-relative action IDs, bidirectional conversions, replay, uniform
+random play, human-versus-random terminal play, and the registered CLI are
+implemented. Tests exercise the engine directly, batch runners, interactive
+behavior, and the actual command-line entry point.
 
 ## Setup
 
@@ -20,21 +20,29 @@ uv sync --locked
 uv run --locked python -m unittest discover -s tests -v
 ```
 
-The tests cover model validation, immutability, engine rules and errors, reachable
-N=1 states, core line count, API signatures, remaining frontend stubs, and
-example-file consistency. They do not establish end-to-end frontend behavior.
+The tests cover model validation, immutability, engine rules and errors, fixed
+action IDs, reachable N=1 states, core line count, API signatures, random/replay
+equivalence, input errors, and process behavior. Both the real replay runner and
+registered CLI must match the hand-authored expected report.
 
-If this macOS environment reports `Skipping hidden .pth file` for its default
-`.venv`, use a separate environment for both commands:
+The `uv` executable must be on the terminal's `PATH`. In this development setup
+it is installed in `~/.local/bin`, which both login and interactive zsh sessions
+include. No temporary uv executable or environment-variable prefix is needed.
+
+This macOS checkout previously marked the editable-install `.pth` file inside
+the default `.venv` as hidden, so Python skipped it. The local `.venv` now points
+to a persistent environment outside the repository. To create the same layout
+when `.venv` does not already exist:
 
 ```sh
-UV_PROJECT_ENVIRONMENT=/tmp/hanoi-crossing-env uv sync --locked
-UV_PROJECT_ENVIRONMENT=/tmp/hanoi-crossing-env uv run --locked python -m unittest discover -s tests -v
+uv venv --python 3.14 "$HOME/.local/share/uv/venvs/hanoi-crossing"
+ln -s "$HOME/.local/share/uv/venvs/hanoi-crossing" .venv
+uv sync --locked
 ```
 
-This selects an environment outside the repository without changing the package
-or global Python settings. The project configuration and imports have been
-validated using an external environment. No CLI entry point is registered yet.
+The environment and symlink are ignored by Git. Ordinary `uv run` discovers this
+environment; package imports and global Python settings are unchanged. Other
+checkouts can use the usual project-local `.venv` created by `uv sync`.
 
 ## Layout
 
@@ -43,16 +51,19 @@ src/hanoi_crossing/
     __init__.py          # Public engine interface
     engine.py            # State, observations, legal actions, and transitions
     random_player.py     # Random player using the external-agent interface
-    cli.py               # Replay and random-play frontends
+    cli.py               # Replay, random-play, and interactive frontends
 tests/
     test_engine.py
     test_gameplay.py
+    test_action_ids.py
     test_core_size.py
     test_random_player.py
     test_cli.py
+    test_cli_process.py
+    test_interactive.py
 examples/
     replay.json          # N=1 contract input from the assignment example
-    replay.expected.json # Hand-authored expected report, not engine output
+    replay.expected.json # Hand-authored expected report checked against the CLI
 ```
 
 All models, validation, rules, and adjudication belong in `engine.py`; `__init__.py`
@@ -116,12 +127,12 @@ must be tuples, including each nested stack; mutable inputs are rejected rather
 than retained or silently converted. Empty stacks are `()`, empty hands are
 `None`, and **every stack runs bottom to top**, so its last item is the top disk.
 
-| Model | Fields and fixed order |
-| --- | --- |
-| `GameState` | `poles`: five stacks in `POLE_IDS = ("1a", "1b", "2", "3a", "3b")`; `hands`: `(A, B)`; `winner`: `"A"`, `"B"`, or `None` |
-| `Observation` | `player`; `visible_poles`: `(own start, shared, own goal)`; `hand`: this player's hand; `winner`: public terminal result |
-| `Action` | `kind`: `"lift"`, `"place"`, or `"skip"`; `pole`: absolute pole ID for lift/place, `None` for skip; actor is a separate `step` argument |
-| `StepResult` | `state`: `GameState`; `error`: a declared error code or `None`; `None` means accepted, including a legal skip |
+| Model           | Fields and fixed order                                                                                                                                |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GameState`   | `poles`: five stacks in `POLE_IDS = ("1a", "1b", "2", "3a", "3b")`; `hands`: `(A, B)`; `winner`: `"A"`, `"B"`, or `None`              |
+| `Observation` | `player`; `visible_poles`: `(own start, shared, own goal)`; `hand`: this player's hand; `winner`: public terminal result                    |
+| `Action`      | `kind`: `"lift"`, `"place"`, or `"skip"`; `pole`: absolute pole ID for lift/place, `None` for skip; actor is a separate `step` argument |
+| `StepResult`  | `state`: `GameState`; `error`: a declared error code or `None`; `None` means accepted, including a legal skip                               |
 
 For A, visible stacks correspond to global indices `(0, 2, 3)`; for B, `(1, 2, 4)`.
 The exported aliases include `Player`, `PoleId`, `ActionKind`, `Disk`, `Stack`,
@@ -189,6 +200,8 @@ classDiagram
         +observe(state, player) Observation
         +legal_actions(observation) ActionList
         +step(state, player, action) StepResult
+        +action_from_id(player, action_id) Action
+        +action_to_id(player, action) int
     }
 
     class random_player {
@@ -201,6 +214,7 @@ classDiagram
         +main()
         +run_replay(data)
         +run_random(n, seed, max_steps)
+        +run_interactive(n, human, seed, max_steps)
     }
 
     cli ..> engine : initialize, observe, step
@@ -216,20 +230,24 @@ classDiagram
 
 ## Python API contract
 
-`new_game`, `observe`, `legal_actions`, and `step` are implemented. The remaining
-random-player and CLI functions are interface stubs that raise
-`NotImplementedError` before selecting an action or parsing input.
+All functions below are implemented. `run_replay` and `run_random` do not print,
+read files, or exit the process. `main` handles batch process I/O and delegates
+interactive terminal I/O to `run_interactive`. Runner input errors raise
+`InputError`, a `ValueError` subclass defined in `cli.py`.
 
-| Function | Contract |
-| --- | --- |
-| `new_game(n: int) -> GameState` | Reject nonpositive or noninteger `n`, including booleans, with `ValueError`; create the agreed initial state |
-| `observe(state: GameState, player: Player) -> Observation` | Return the current player's three stacks, own hand, and public winner; reject an invalid player with `ValueError` |
-| `legal_actions(observation: Observation) -> ActionList` | Use this observation alone; return `()` when terminal; otherwise return the canonical legal actions below |
-| `step(state: GameState, player: Player, action: Action) -> StepResult` | Validate the actor and action against the actual state; perform one atomic action, check both players, and never mutate the input |
-| `choose_action(observation: Observation, rng: random.Random) -> Action` | Call `legal_actions` and uniformly choose from it; raise `ValueError` if no actions are available |
-| `run_replay(data: dict[str, object]) -> dict[str, object]` | Validate the entire input before running; execute its explicit schedule and return the report below |
-| `run_random(n: int, seed: int, max_steps: int) -> dict[str, object]` | Validate parameters; use one local seeded RNG and fresh observations for alternating A/B turns; return the report below |
-| `main() -> int` | Parse CLI input, report input failures, and serialize one run report; return the process exit status |
+| Function                                                                  | Contract                                                                                                                                                    |
+| ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `new_game(n: int) -> GameState`                                         | Reject nonpositive or noninteger`n`, including booleans, with `ValueError`; create the agreed initial state                                             |
+| `observe(state: GameState, player: Player) -> Observation`              | Return the current player's three stacks, own hand, and public winner; reject an invalid player with`ValueError`                                          |
+| `legal_actions(observation: Observation) -> ActionList`                 | Use this observation alone; return`()` when terminal; otherwise return the canonical legal actions below                                                  |
+| `step(state: GameState, player: Player, action: Action) -> StepResult`  | Validate the actor and action against the actual state; perform one atomic action, check both players, and never mutate the input                           |
+| `action_from_id(player: Player, action_id: int) -> Action`              | Decode one fixed player-relative ID without consulting state or move legality; reject invalid players or IDs with`ValueError`                             |
+| `action_to_id(player: Player, action: Action) -> int`                   | Encode a visible action without checking move legality; reject invalid players, non-`Action` inputs, or another player's private pole with `ValueError` |
+| `choose_action(observation: Observation, rng: random.Random) -> Action` | Call`legal_actions` and uniformly choose from it; raise `ValueError` if no actions are available                                                        |
+| `run_replay(data: dict[str, object]) -> dict[str, object]`              | Validate the entire input before running; execute its explicit schedule and return the report below                                                         |
+| `run_random(n: int, seed: int, max_steps: int) -> dict[str, object]`    | Validate parameters; use one local seeded RNG and fresh observations for alternating A/B turns; return the report below                                     |
+| `run_interactive(n: int, human: Player, seed: int, max_steps: int) -> int` | Validate parameters; alternate human and random turns; display only the human observation; return 0 on normal completion |
+| `main() -> int` | Parse CLI input, report input failures, and serialize a batch report or start interactive play; return the process exit status |
 
 The core can already execute the assignment's example directly:
 
@@ -253,12 +271,51 @@ returns the **same input state object** with a nonempty error code. Terminal
 calls do the same with `game_over`. An accepted skip also returns the same state
 object, with no error. Changed states are new immutable values.
 
+### Fixed action IDs
+
+The public immutable tuple `ACTION_IDS = (0, 1, 2, 3, 4, 5, 6)` defines the
+complete action space. IDs are fixed from the first version and share the same
+player-relative meaning for A and B. They are **not indices into the current
+`legal_actions` result**.
+
+| ID | Meaning      | A's`Action(kind, pole)` | B's`Action(kind, pole)` |
+| -- | ------------ | ------------------------- | ------------------------- |
+| 0  | skip         | `Action("skip")`        | `Action("skip")`        |
+| 1  | lift_start   | `Action("lift", "1a")`  | `Action("lift", "1b")`  |
+| 2  | lift_shared  | `Action("lift", "2")`   | `Action("lift", "2")`   |
+| 3  | lift_goal    | `Action("lift", "3a")`  | `Action("lift", "3b")`  |
+| 4  | place_start  | `Action("place", "1a")` | `Action("place", "1b")` |
+| 5  | place_shared | `Action("place", "2")`  | `Action("place", "2")`  |
+| 6  | place_goal   | `Action("place", "3a")` | `Action("place", "3b")` |
+
+`start/shared/goal` map to `1a/2/3a` for A and `1b/2/3b` for B. Conversions
+depend only on the player and ID or action, never on the board, held disk,
+number of legal actions, or terminal status. For either player, encoding a
+decoded ID returns the same ID; decoding an encoded visible action returns
+the same action.
+
+For example, while holding a disk, ID 1 still decodes to `lift_start`; passing
+it to `step` returns `hand_full`. Legal actions may then have IDs `(0, 4, 5, 6)`:
+the second entry has ID 4, not ID 1. During ongoing play ID 0 is always legal;
+terminal `legal_actions` returns `()`, although the conversions still work.
+A future action mask can mark these seven IDs using the current observation's
+legal actions; no mask or training framework is implemented here.
+
+Decoding rejects booleans, nonintegers, negative IDs, and IDs above 6 with
+`ValueError`. Both conversions reject invalid players. Encoding another player's
+private pole also raises `ValueError` because it has no ID in this relative
+action space. Such an `Action` remains structurally valid and, when submitted
+directly to `step` during ongoing play, still returns `invisible_pole`.
+
+Replay JSON continues to use `kind/pole`; it does not accept an `action_id`
+field or a second way to supply the same action.
+
 ### Input errors versus illegal game actions
 
 Unknown players, unknown action kinds or pole IDs, missing required fields,
 wrong types, and a `skip` with a non-null pole are input errors. Python model
-constructors and the eventual runner validators use `ValueError` for invalid
-values. They are not counted as game turns. Missing Python arguments or
+constructors use `ValueError`; runner protocol validation uses `InputError` for
+invalid values. They are not counted as game turns. Missing Python arguments or
 unexpected Python keyword arguments are ordinary `TypeError`s.
 
 A known pole belonging to the other player is a well-shaped action but is
@@ -313,14 +370,17 @@ sequenceDiagram
 ## Input and output
 
 Replay accepts a UTF-8 JSON file containing the recorded moves and turn order.
-Random play accepts command-line parameters. Both frontends return the same
-JSON run-report structure, with an additional seed field for random play.
+Random play accepts command-line parameters. These two batch frontends return
+the same JSON run-report structure, with an additional seed field for random
+play. Interactive `play` reads terminal actions and displays text from the
+human player's observation.
 
-These commands are planned interfaces and **are not runnable yet**:
+Run a frontend after setup:
 
 ```sh
 uv run hanoi-crossing replay examples/replay.json
-uv run hanoi-crossing random --n 3 --seed 42 --max-steps 1000
+uv run hanoi-crossing play --n 3 --human A --seed 42 --max-steps 1000
+uv run hanoi-crossing random --n 5 --seed 42 --max-steps 10000
 ```
 
 ### Input: replay file
@@ -331,7 +391,9 @@ exactly `player` and `action`, and each action has exactly `kind` and `pole`.
 For skip, explicitly write `"pole": null`. Players and action fields use the
 case-sensitive identifiers above. Unknown/missing keys, duplicate JSON keys,
 and nonstandard JSON numbers are input errors. Validate the whole document,
-including any eventual unexecuted tail, before initializing a run.
+including any eventual unexecuted tail, before initializing a run. Errors identify
+the affected object or field, such as `turns[7].action.pole`. The runner does not
+mutate the supplied document.
 
 The ordered turns combine the pre-recorded moves and their external schedule;
 there are no separate arrays whose lengths could disagree. For example:
@@ -358,19 +420,61 @@ uniformly sample all their current legal actions, including skip. Reproducibilit
 is defined for the same Python and engine versions, parameters, and canonical
 action order. No cross-version random-sequence guarantee is made.
 
+The policy calls `rng.choice(legal_actions(observation))` after checking for an
+empty terminal action set. It applies no weights, search, win preference,
+repetition avoidance, or filtering of reversals and other unhelpful moves.
+Each scheduled turn uses a fresh observation. If the policy ever submits an
+action that `step` rejects, the runner raises `RuntimeError` without retrying:
+that is an implementation defect, not an ordinary replay error.
+
+A random report's consumed `player/action` records can be used as replay input
+with the same `n`. Tests require identical final states and per-action results;
+`max_steps` becomes `sequence_exhausted` when neither run has a winner.
+
+### Input and output: interactive play
+
+`play` requires `--n`, `--seed`, and `--max-steps` with the same integer
+constraints as random play. `--human A` is the default; `--human B` makes the
+computer act first. A always starts and players alternate. The computer uses
+the same uniform random policy and a per-game `Random(seed)` instance.
+
+The terminal shows only the human's start, shared and goal stacks (bottom to
+top), own hand, consumed attempts, and currently legal action IDs. Opponent
+private poles, hand, and specific actions are never printed, including after
+the game ends. Computer turns print only `Computer turn completed.`; shared
+changes appear in the next human observation.
+
+| Terminal input                     | Behavior                                                        |
+| ---------------------------------- | --------------------------------------------------------------- |
+| `0` through `6`                | Submit the fixed player-relative action ID from the table above |
+| `h` or `help`                  | Show all seven action meanings; consume no turn                 |
+| `q` or `quit`, or end of input | Stop normally without declaring a winner                        |
+| Blank, out-of-range, or other text | Explain the input error and retry the same turn                 |
+
+A valid ID can still be illegal in the current state. It is submitted to
+`step`, its error is displayed, and the attempt is consumed before the opponent
+acts. Skips also consume attempts. Help and malformed input never advance the
+game or RNG. The limit counts both players' attempts. Any winner ends play
+immediately, even if caused by the other player's action or on the last allowed
+attempt. Reaching the limit is reported as no winner, not a draw.
+
+The interactive frontend owns terminal I/O and returns a process status; it
+does not emit the full referee JSON report. `run_replay` and `run_random` remain
+I/O-free functions.
+
 ### Output: run report
 
 Both runners return a JSON-compatible dictionary. JSON object key order and
 whitespace are not part of the protocol; stack and turn array order are.
 
-| Field | Meaning |
-| --- | --- |
-| `state` | Full referee snapshot: `poles` keyed by all five absolute pole IDs, `hands` keyed by `A` and `B`, and `winner`; tuples serialize as arrays and `None` as JSON `null` |
-| `steps_consumed` | Number of attempted in-game turns, including illegal actions and skips; equals `len(steps)` |
-| `stop_reason` | `"winner"`, `"sequence_exhausted"` for replay, or `"max_steps"` for random play |
-| `steps` | Consumed turns in order; each has `player`, the submitted `action`, and `error` (`null` when accepted, otherwise a declared step error) |
-| `unexecuted_turns` | Exact unconsumed replay tail, in order; `[]` for random runs, which do not pre-generate future actions |
-| `seed` | Present only for random runs; the integer seed supplied to that run |
+| Field                | Meaning                                                                                                                                                                           |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `state`            | Full referee snapshot:`poles` keyed by all five absolute pole IDs, `hands` keyed by `A` and `B`, and `winner`; tuples serialize as arrays and `None` as JSON `null` |
+| `steps_consumed`   | Number of attempted in-game turns, including illegal actions and skips; equals`len(steps)`                                                                                      |
+| `stop_reason`      | `"winner"`, `"sequence_exhausted"` for replay, or `"max_steps"` for random play                                                                                             |
+| `steps`            | Consumed turns in order; each has`player`, the submitted `action`, and `error` (`null` when accepted, otherwise a declared step error)                                    |
+| `unexecuted_turns` | Exact unconsumed replay tail, in order;`[]` for random runs, which do not pre-generate future actions                                                                           |
+| `seed`             | Present only for random runs; the integer seed supplied to that run                                                                                                               |
 
 The full report is for the caller/referee, never input to the random strategy.
 On a win, stop before consuming the next turn. `winner` takes precedence if the
@@ -379,10 +483,8 @@ limit leaves `state.winner` as `null`. An empty replay returns the initial state
 zero consumed steps, and `sequence_exhausted`.
 
 `examples/replay.expected.json` is the hand-authored report for the input above:
-A wins with disk 1 on `3a`, while B still holds disk 2. It is a contract fixture,
-not output captured from an implemented engine. Tests currently validate its
-shape and consistency; a future integration test must compare actual replay
-output with it.
+A wins with disk 1 on `3a`, while B still holds disk 2. This independently written
+fixture is compared with actual `run_replay` and registered CLI output in tests.
 
 ```json
 {
@@ -404,12 +506,24 @@ output with it.
 
 ### Process output and exit status
 
-Successful execution emits exactly one JSON report to stdout and exits 0,
-including runs with no winner. Invalid input or an unreadable replay file emits
-a diagnostic to stderr, no report to stdout, and exits 2. Internal failures must
-remain failures; they must never be converted into an apparently successful game
-report. The current stubs propagate `NotImplementedError` rather than returning
-invented reports.
+Successful replay/random execution serializes the complete report before
+writing exactly one JSON document to stdout. Interactive play writes prompts,
+observations, and game messages to stdout. Process diagnostics go to stderr.
+
+| Outcome                                                                  | Exit status                       |
+| ------------------------------------------------------------------------ | --------------------------------- |
+| Finished run, including no winner, interactive quit or EOF               | `0`                             |
+| Invalid arguments, replay schema/JSON, unreadable file, or invalid UTF-8 | `2`                             |
+| Terminal read, output write or flush failure handled by`main`          | `1`                             |
+| Keyboard interrupt                                                       | `130`                           |
+| Unexpected internal exception                                            | Nonzero; the exception propagates |
+
+Input failures produce no report. `--help` keeps normal argparse behavior:
+print usage to stdout and exit `0`. Argparse uses `SystemExit` for help and
+argument errors; otherwise `main` returns the process status to its registered
+console entry point. Help uses plain text so color detection cannot fail before
+output error handling. Internal engine or serialization `ValueError`s are not
+reclassified as input errors, and random-policy failures are never retried.
 
 ## AI assistance
 
@@ -427,5 +541,9 @@ validation, and the physical-line guard, and translating the supplied corner
 cases into direct engine regression tests. Focused Codex subagents helped write
 the gameplay tests and independently reviewed the core implementation.
 
-Random-player and frontend behavior are still pending. Direct engine checks are
-not full assignment acceptance tests.
+Xiaokang Yin requested fixed action IDs in the first version. Codex implemented
+the player-relative conversions, public exports, documentation, and regression
+tests for that requirement.
+
+Xiaokang Yin provided the CLI design for replay, random play, and
+human-versus-random interaction. Codex implemented the CLI based on that design.

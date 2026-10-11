@@ -9,11 +9,12 @@
   The class and sequence diagrams explain the module boundaries and call flow.
 - The current repository implements immutable models and the four core engine
   functions: initialization, observation, legal actions, and atomic transitions
-  with adjudication. Random-player selection and both frontends remain stubs.
-  Direct engine tests do not establish end-to-end frontend behavior.
-- Implement only the requested stage. Keep a pending function's explicit
-  `NotImplementedError` until its behavior is implemented; never substitute a
-  fabricated successful result. Update the README status when that changes.
+  with adjudication, plus fixed player-relative action IDs and conversions.
+  Uniform random selection, replay and random runners, human-versus-random
+  terminal play, and the registered CLI are also implemented. Keep direct
+  engine, runner, and real CLI checks distinct.
+- Implement only the requested scope. Do not add an intelligent strategy or
+  other future features. Update the README when observable behavior changes.
 - Treat the supplied assignment as requirements to interpret, not permission to
   submit work, contact people, or perform unrelated external actions.
 
@@ -37,8 +38,32 @@
 - `step` validates the submitted action against the actual state. Preserve the
   documented distinction between malformed input and a wasted illegal turn,
   error precedence, unchanged-state identity, and checks for either winner.
+- Preserve `ACTION_IDS = (0, 1, 2, 3, 4, 5, 6)`: skip, lift start/shared/goal,
+  then place start/shared/goal. `action_from_id` and `action_to_id` depend only
+  on the player and ID/action, not state or legality. Reuse the visibility
+  mapping; never use an index into the current legal-action list as a fixed ID.
+  Encoding hidden poles raises `ValueError`; submitting such an `Action`
+  directly to `step` still returns `invisible_pole` during ongoing play.
+  Keep replay JSON in its existing `kind/pole` format.
 - The CLI owns parsing, external turn order, run limits, RNG creation, and
   serialization. Do not duplicate game rules in the CLI or random player.
+- Validate the complete replay, including an unexecuted tail, before `new_game`.
+  Protocol failures raise `cli.InputError`; do not relabel runtime engine or
+  serialization exceptions as input errors. Keep duplicate-key and nonstandard
+  JSON-number rejection at the file-decoding boundary. `run_replay` and
+  `run_random` perform no I/O; `run_interactive` owns terminal input and output.
+  Interactive rendering takes only the human observation. Never print the
+  opponent's private poles, hand, or specific actions, even after a win.
+  Valid action IDs reach `step` and consume attempts even when rejected. Help,
+  malformed input, and quitting do not consume turns. A starts, players
+  alternate, and quitting/EOF declares no winner.
+- Random selection is exactly `rng.choice` over the complete legal action
+  tuple, including skip, with no heuristic filtering or retries. Use one
+  independent `Random(seed)` per run, shared by alternating A/B turns. Freshly
+  observe, select, and step on each turn. A rejected random action is a defect.
+- Count skips and illegal replay actions as attempts. Stop immediately on any
+  winner, including one created by the opponent's action or on the last allowed
+  step. Exhaustion and step limits mean no winner, not an automatic draw.
 - Preserve state isolation across games. Any future service must serialize
   observation/action processing per game outside the engine. Do not add an RL
   environment, web service, strategy framework, or extra classes in anticipation
@@ -60,16 +85,21 @@
 - Exercise engine behavior directly with standard-library `unittest`. Add small
   behavioral tests for nontrivial new logic and regressions, including error
   paths; do not use only CLI tests as evidence for the engine.
-- Replace the corresponding stub-exception assertions when implementing a
-  function. Preserve the model validation and immutability tests.
+- Preserve the model validation, immutability, and direct gameplay tests.
+- Cover all seven IDs for both players, round trips, changing legal-action
+  sets, invalid IDs/types/players, and private-pole encoding errors. Count the
+  conversion functions, constants, and exports as core Python lines.
 - Gameplay tests must cover information visibility, arbitrary external turn
   order, invalid-action state preservation, disk conservation, both players'
   win checks, and terminal behavior as specified in the README. Random/replay
   tests must cover legal sampling, reproducibility, stop reasons, and actual
   replay output. Use separate states and RNG instances when checking isolation.
-- The current JSON examples are hand-authored contract fixtures. Their shape
-  checks do not prove that a replay ran. Once the runner exists, compare its
-  real output with the expected fixture.
+- The JSON examples are hand-authored contract fixtures. Compare real runner
+  and registered CLI output with the expected fixture. Replay sampled random
+  trajectories to check identical final states and action results.
+- Test the registered console entry point, stdout JSON, stderr diagnostics,
+  and exit statuses. Preserve input rejection, no silent internal failures,
+  output write/flush errors, and keyboard-interrupt handling.
 - Keep `uv.lock` in Git. Do not commit environments, caches, generated artifacts,
   credentials, or unrelated changes. Keep the README AI-assistance disclosure
   accurate as work progresses.
@@ -87,8 +117,9 @@ wc -l src/hanoi_crossing/engine.py src/hanoi_crossing/__init__.py
 
 If core code is added to another module, include it in the line count. The
 [setup notes](README.md#setup) document the observed macOS hidden-`.pth` problem
-and the external-environment workaround; do not alter package imports or global
-Python settings to hide an environment problem.
+and the ignored `.venv` symlink to a persistent external environment. Normal
+`uv run` must work without temporary-directory overrides. Do not alter package
+imports or global Python settings to hide an environment problem.
 
 Report what changed, checks actually run, and remaining implementation limits.
 Separate model/interface checks, gameplay tests, and end-to-end frontend checks.

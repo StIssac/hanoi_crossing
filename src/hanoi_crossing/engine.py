@@ -18,6 +18,7 @@ type Error = Literal[
 
 PLAYERS: tuple[Player, Player] = ("A", "B")
 POLE_IDS: tuple[PoleId, ...] = ("1a", "1b", "2", "3a", "3b")
+ACTION_IDS: tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6)
 _VISIBLE_INDICES = ((0, 2, 3), (1, 2, 4))
 STEP_ERRORS: tuple[Error, ...] = (
     "game_over", "invisible_pole", "hand_full", "empty_pole",
@@ -159,6 +160,31 @@ class StepResult:
 
 
 type ActionList = tuple[Action, ...]
+
+
+def action_from_id(player: Player, action_id: int) -> Action:
+    """Decode a fixed player-relative ID without checking current move legality."""
+    _validate_player(player)
+    if type(action_id) is not int or action_id not in ACTION_IDS:
+        raise ValueError("action_id must be an integer from 0 to 6, not a boolean")
+    if action_id == 0:
+        return Action("skip")
+    kind_index, pole_index = divmod(action_id - 1, 3)
+    p = _VISIBLE_INDICES[PLAYERS.index(player)][pole_index]
+    return Action("lift" if kind_index == 0 else "place", POLE_IDS[p])
+
+
+def action_to_id(player: Player, action: Action) -> int:
+    """Encode a visible action; its fixed ID does not imply it is currently legal."""
+    _validate_player(player)
+    _require_model(action, Action)
+    if action.kind == "skip":
+        return 0
+    p = POLE_IDS.index(action.pole)
+    indices = _VISIBLE_INDICES[PLAYERS.index(player)]
+    if p not in indices:
+        raise ValueError("action pole is not visible to this player")
+    return (1 if action.kind == "lift" else 4) + indices.index(p)
 
 
 def new_game(n: int) -> GameState:
